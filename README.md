@@ -1,5 +1,9 @@
-参考了代码 <u>https://github.com/alphabt/asuswrt-merlin-ddns-cloudflare/blob/master/ddns-start</u> 并进行一些增强型修改，添加了更加丰富的日志显示。以及更多的容错处理。
+参考了代码 <https://github.com/alphabt/asuswrt-merlin-ddns-cloudflare/blob/master/ddns-start> 并进行一些增强型修改。
 
-使用方式：将脚本下载到 /jffs/script 目录后编辑配置即可。
+主要修改部分：
+添加了更加丰富的日志显示。以及更多的容错处理。
+去除了对于 Python 的依赖，即使未安装任何额外插件也能正常的使用。
 
-也可以手动 bash 来调用该脚本
+使用方式：将脚本下载到 /jffs/script 目录后编辑配置。
+         chmod +x ddns-start
+         bash ddns-start
