@@ -1,3 +1,5 @@
+完全的支持ipv6和ipv4的更新。
+
 参考了代码 <https://github.com/alphabt/asuswrt-merlin-ddns-cloudflare/blob/master/ddns-start> 并进行一些增强型修改。
 
 主要修改部分：
