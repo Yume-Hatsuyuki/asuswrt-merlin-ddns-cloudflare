@@ -1,0 +1,228 @@
+#!/bin/sh
+
+API_TOKEN=""      # 你的API令牌
+ZONE_ID=""        # 区域ID（16进制字符串）
+RECORD_NAME=""    # DNS记录名称，例如 sub.example.com
+RECORD_TTL="1"    # TTL时间（1表示自动）
+UPDATE_IPv4=true  # 设为true时更新IPv4记录
+UPDATE_IPv6=true  # 设为true时更新IPv6记录
+IP_QUERY_SITE="ipw.cn"    # 用于获取公网IP的查询站点（用于路由器在双NAT下无法获取IP的情况）
+
+# 获取指定记录类型的 DNS记录 ID
+get_dns_record_ids() {
+  local record_name=$1
+  local type=$2
+  local api_token=$3
+  local zone_id=$4
+
+  RESPONSE="$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?type=${type}&name=${record_name}" \
+    -H "Authorization: Bearer ${api_token}" \
+    -H "Content-Type: application/json")"
+
+  # 检查是否返回了有效的响应
+  if echo "$RESPONSE" | jq -e '.result | length > 0' >/dev/null; then
+    # 如果返回有记录，提取ID
+    echo "$RESPONSE" | jq -r '.result[] | .id'
+  else
+    # 没有记录返回状态 1
+    return 1
+  fi
+}
+
+# 获取指定记录类型的 DNS记录 IP
+get_dns_record_ips() {
+  local record_name=$1
+  local type=$2
+  local api_token=$3
+  local zone_id=$4
+
+  RESPONSE="$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records?type=${type}&name=${record_name}" \
+    -H "Authorization: Bearer ${api_token}" \
+    -H "Content-Type: application/json")"
+
+  # 检查是否返回了有效的响应
+  if echo "$RESPONSE" | jq -e '.result | length > 0' >/dev/null; then
+    # 如果返回有记录，提取ID
+    echo "$RESPONSE" | jq -r '.result[] | .content'
+  else
+    # 没有记录返回空值
+    return $null
+  fi
+}
+
+# 创建新的DNS记录
+create_dns_record() {
+  local record_name=$1
+  local type=$2
+  local ip=$3
+  local record_ttl=$4
+  local api_token=$5
+  local zone_id=$6
+
+  # 创建DNS记录的请求
+  RESPONSE="$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records" \
+    -H "Authorization: Bearer ${api_token}" \
+    -H "Content-Type: application/json" \
+    --data "{\"type\":\"${type}\",\"name\":\"${record_name}\",\"content\":\"${ip}\",\"ttl\":${record_ttl},\"proxied\":false}")"
+
+  # 检查返回结果是否成功，并返回记录ID
+  RECORD_ID=$(echo "$RESPONSE" | jq -r '.result.id')
+  if [ -n "$RECORD_ID" ]; then
+    echo "$RECORD_ID"
+  else
+    echo "$RESPONSE"
+  fi
+}
+
+# 更新DNS记录
+update_dns_record() {
+  local record_name=$1
+  local record_id=$2
+  local type=$3
+  local ip=$4
+  local record_ttl=$5
+  local api_token=$6
+  local zone_id=$7
+
+  RESPONSE="$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${zone_id}/dns_records/${record_id}" \
+    -H "Authorization: Bearer ${api_token}" \
+    -H "Content-Type: application/json" \
+    --data "{\"type\":\"${type}\",\"name\":\"${record_name}\",\"content\":\"${ip}\",\"ttl\":${record_ttl},\"proxied\":false}")"
+
+    # 提取并检查响应的 success 字段
+    SUCCESS_STATUS=$(echo "$RESPONSE" | jq -r '.success')
+
+    if [ "$SUCCESS_STATUS" == "true" ]; then
+      echo "true"
+    else
+      echo "$RESPONSE"
+    fi
+}
+
+SUCCESS=0  # 0表示失败，1表示成功
+
+# 可选更新IPv4记录
+if [ "$UPDATE_IPv4" == true ]; then
+
+    # 初始化成功标志
+    IP_FETCHED=false
+
+    # 优先从路由器获取IP，失败时使用外部查询
+    IPv4=${1}
+    if [ -z "$IPv4" ]; then
+        # 尝试从外部站点获取IP
+        IPv4="$(curl -fs4 https://4.$IP_QUERY_SITE)"
+        
+        # 检查curl是否成功获取IP地址
+        if [ $? -eq 0 ] && [ -n "$IPv4" ]; then
+            logger -t ddns-cloudflare "从外部站点 $IP_QUERY_SITE 获取到IP地址 [${IPv4}]"
+            IP_FETCHED=true
+        else
+            logger -t ddns-cloudflare "从外部站点 $IP_QUERY_SITE 获取IP地址失败"
+            IP_FETCHED=false
+        fi
+    else
+        # 如果从路由器直接获取到IP
+        logger -t ddns-cloudflare "从路由器获取到IP地址 [${IPv4}]"
+        IP_FETCHED=true
+    fi
+
+    # 如果没有成功获取IP，则跳过后续更新
+    if [ "$IP_FETCHED" == true ]; then
+        # 获取所有A记录信息
+        A_RECORD_IDS=$(get_dns_record_ids "$RECORD_NAME" "A" "$API_TOKEN" "$ZONE_ID")
+        A_RECORD_IPS=$(get_dns_record_ips "$RECORD_NAME" "A" "$API_TOKEN" "$ZONE_ID")
+
+        # 如果没有找到A记录，调用API创建新的记录
+        if [ $? -eq 1 ]; then
+            logger -t ddns-cloudflare "没有找到A记录，尝试创建新的A记录 ${RECORD_NAME}"
+            CREATE_RECORD_ID=$(create_dns_record "$RECORD_NAME" "A" "$IPv4" "$RECORD_TTL" "$API_TOKEN" "$ZONE_ID")
+
+            if [ "$CREATE_RECORD_ID" != "false" ]; then
+                logger -t ddns-cloudflare "成功创建新的A记录 ${RECORD_NAME} -> [${IPv4}]"
+                SUCCESS=1  # 只要有一个更新成功就标记为成功
+            else
+                logger -t ddns-cloudflare "创建A记录失败 ${RECORD_NAME} (当前IP: [${IPv4}])，响应内容: ${CREATE_RECORD_ID}"
+            fi
+        else
+            # 如果找到A记录，继续更新
+            for A_RECORD_ID in $A_RECORD_IDS; do
+            RESPONSE="$(update_dns_record $RECORD_NAME $A_RECORD_ID A $IPv4 $RECORD_TTL $API_TOKEN $ZONE_ID)"
+                if [ "$RESPONSE" == "true" ]; then
+                    logger -t ddns-cloudflare "成功更新A记录 ${RECORD_NAME}：[${A_RECORD_IPS}] -> [${IPv4}]"
+                    SUCCESS=1  # 只要有一个更新成功就标记为成功
+                else
+                    logger -t ddns-cloudflare "A记录更新失败 ${RECORD_NAME} (当前IP: [${IPv4}])，响应内容: ${RESPONSE}"
+                fi
+            done
+        fi
+    else
+        logger -t ddns-cloudflare "未能获取到有效的IPv4地址，请检查网络。"
+    fi
+fi
+
+# 可选IPv6更新
+if [ "$UPDATE_IPv6" == true ]; then
+
+    # 初始化成功标志
+    IP_FETCHED=false
+
+    IPv6="$(ip -6 addr list scope global | grep -v " fd" | sed -n 's/.*inet6 \([0-9a-f:]\+\).*/\1/p' | tail -n 1)"
+
+    # 尝试从外部站点获取IPv6地址
+    if [ -z "$IPv6" ]; then
+        # 尝试获取IPv6地址
+        IPv6="$(curl -fs6 https://6.$IP_QUERY_SITE)"
+        
+        # 检查curl是否成功获取IPv6地址
+        if [ $? -eq 0 ] && [ -n "$IPv6" ]; then
+            logger -t ddns-cloudflare "从外部站点 $IP_QUERY_SITE 获取到IP地址 [${IPv6}]"
+            IP6_FETCHED=true
+        else
+            logger -t ddns-cloudflare "从外部站点 $IP_QUERY_SITE 获取IPv6地址失败"
+            IP6_FETCHED=false
+        fi
+    else
+        logger -t ddns-cloudflare "从路由器获取到IPv6地址 [${IPv6}]"
+        IP6_FETCHED=true
+    fi
+
+    # 如果成功获取到IPv6地址，进行AAAA记录更新
+    if [ "$IP6_FETCHED" == true ]; then
+        AAAA_RECORD_IDS=$(get_dns_record_ids "$RECORD_NAME" "AAAA" "$API_TOKEN" "$ZONE_ID")
+        AAAA_RECORD_IPS=$(get_dns_record_ips "$RECORD_NAME" "AAAA" "$API_TOKEN" "$ZONE_ID")
+
+        if [ $? -eq 1 ]; then
+            logger -t ddns-cloudflare "没有找到AAAA记录，尝试创建新的AAAA记录 ${RECORD_NAME}"
+            CREATE_RECORD_ID=$(create_dns_record "$RECORD_NAME" "AAAA" "$IPv6" "$RECORD_TTL" "$API_TOKEN" "$ZONE_ID")
+
+            if [ "$CREATE_RECORD_ID" != "false" ]; then
+                logger -t ddns-cloudflare "成功创建新的AAAA记录 ${RECORD_NAME} -> [${IPv6}]"
+                SUCCESS=1
+            else
+                logger -t ddns-cloudflare "创建AAAA记录失败 ${RECORD_NAME} (当前IP: [${IPv6}])，响应内容: ${CREATE_RECORD_ID}"
+            fi
+        else
+            for AAAA_RECORD_ID in $AAAA_RECORD_IDS; do
+                RESPONSE="$(update_dns_record $RECORD_NAME $AAAA_RECORD_ID AAAA $IPv6 $RECORD_TTL $API_TOKEN $ZONE_ID)"
+
+                if [ "$RESPONSE" == "true" ]; then
+                    logger -t ddns-cloudflare "成功更新AAAA记录 ${RECORD_NAME}：[${AAAA_RECORD_IPS}] -> [${IPv6}]"
+                    SUCCESS=1
+                else
+                    logger -t ddns-cloudflare "AAAA记录更新失败 ${RECORD_NAME} (当前IP: ${IPv6})，响应内容: ${RESPONSE}"
+                fi
+            done
+        fi
+    else
+        logger -t ddns-cloudflare "未能获取到有效的IPv6地址，请检查网络。"
+    fi
+fi
+
+# 返回状态码，表示是否至少有一个更新成功
+if [ "$SUCCESS" -eq 1 ]; then
+  /sbin/ddns_custom_updated 1
+else
+  /sbin/ddns_custom_updated 0
+fi
+
